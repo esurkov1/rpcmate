@@ -1,5 +1,5 @@
 {
-  "name": "http2-rpc",
+  "name": "rpcmate",
   "version": "1.0.0",
   "description": "Lightweight HTTP/2 RPC server with JWT authentication and retry mechanism",
   "main": "http2rpc.js",
@@ -24,10 +24,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/esurkov1/http2-rpc.git"
+    "url": "git+https://github.com/esurkov1/rpcmate.git"
   },
       "bugs": {
-      "url": "https://github.com/esurkov1/http2-rpc/issues"
+      "url": "https://github.com/esurkov1/rpcmate/issues"
     },
-    "homepage": "https://github.com/esurkov1/http2-rpc#readme"
+    "homepage": "https://github.com/esurkov1/rpcmate#readme"
 }

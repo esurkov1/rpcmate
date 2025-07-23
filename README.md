@@ -1,17 +1,17 @@
-# Http2RPC
+# RPCMate
 
 Легковесный HTTP/2 RPC сервер с поддержкой JWT аутентификации и механизмом повторных запросов.
 
 ## Установка
 
 ```bash
-npm install http2-rpc
+npm install rpcmate
 ```
 
 ## Быстрый старт
 
 ```javascript
-const Http2RPC = require('http2-rpc');
+const Http2RPC = require('rpcmate');
 
 // Создание сервера с методами
 const server = new Http2RPC({
@@ -34,7 +34,7 @@ const server = new Http2RPC({
 ## Использование клиента
 
 ```javascript
-const Http2RPC = require('http2-rpc');
+const Http2RPC = require('rpcmate');
 
 const client = new Http2RPC();
 
@@ -189,7 +189,7 @@ const server = new Http2RPC({
 ### Микросервис пользователей
 
 ```javascript
-const Http2RPC = require('http2-rpc');
+const Http2RPC = require('rpcmate');
 
 const userService = new Http2RPC({
   port: 3001,
@@ -218,7 +218,7 @@ const userService = new Http2RPC({
 ### API Gateway
 
 ```javascript
-const Http2RPC = require('http2-rpc');
+const Http2RPC = require('rpcmate');
 
 const gateway = new Http2RPC({
   port: 3000,
