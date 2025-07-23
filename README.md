@@ -5,13 +5,13 @@
 ## Установка
 
 ```bash
-npm install http2rpc
+npm install http2-rpc
 ```
 
 ## Быстрый старт
 
 ```javascript
-const Http2RPC = require('http2rpc');
+const Http2RPC = require('http2-rpc');
 
 // Создание сервера с методами
 const server = new Http2RPC({
@@ -34,7 +34,7 @@ const server = new Http2RPC({
 ## Использование клиента
 
 ```javascript
-const Http2RPC = require('http2rpc');
+const Http2RPC = require('http2-rpc');
 
 const client = new Http2RPC();
 
@@ -189,7 +189,7 @@ const server = new Http2RPC({
 ### Микросервис пользователей
 
 ```javascript
-const Http2RPC = require('http2rpc');
+const Http2RPC = require('http2-rpc');
 
 const userService = new Http2RPC({
   port: 3001,
@@ -218,7 +218,7 @@ const userService = new Http2RPC({
 ### API Gateway
 
 ```javascript
-const Http2RPC = require('http2rpc');
+const Http2RPC = require('http2-rpc');
 
 const gateway = new Http2RPC({
   port: 3000,

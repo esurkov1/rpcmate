@@ -1,5 +1,5 @@
 {
-  "name": "http2rpc",
+  "name": "http2-rpc",
   "version": "1.0.0",
   "description": "Lightweight HTTP/2 RPC server with JWT authentication and retry mechanism",
   "main": "http2rpc.js",
@@ -24,10 +24,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/esurkov1/http2rpc.git"
+    "url": "git+https://github.com/esurkov1/http2-rpc.git"
   },
-  "bugs": {
-    "url": "https://github.com/esurkov1/http2rpc/issues"
-  },
-  "homepage": "https://github.com/esurkov1/http2rpc#readme"
+      "bugs": {
+      "url": "https://github.com/esurkov1/http2-rpc/issues"
+    },
+    "homepage": "https://github.com/esurkov1/http2-rpc#readme"
 }
