@@ -1,0 +1,33 @@
+{
+  "name": "http2rpc",
+  "version": "1.0.0",
+  "description": "Lightweight HTTP/2 RPC server with JWT authentication and retry mechanism",
+  "main": "http2rpc.js",
+  "scripts": {
+    "start": "node http2rpc.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "http2",
+    "rpc",
+    "server",
+    "jwt",
+    "microservices",
+    "api",
+    "rest",
+    "nodejs"
+  ],
+  "author": "Eugene Surkov <esurkov1@gmail.com>",
+  "license": "MIT",
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/esurkov1/http2rpc.git"
+  },
+  "bugs": {
+    "url": "https://github.com/esurkov1/http2rpc/issues"
+  },
+  "homepage": "https://github.com/esurkov1/http2rpc#readme"
+}
