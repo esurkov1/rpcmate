@@ -13,8 +13,8 @@ npm install rpcmate
 ```javascript
 const Http2RPC = require('rpcmate');
 
-// Создание сервера с методами
-const server = new Http2RPC({
+// Создание RPC сервера с методами (автоматически запускается)
+const rpc = new Http2RPC({
   port: 3000,
   methods: {
     hello: async (params) => {
@@ -26,16 +26,25 @@ const server = new Http2RPC({
   }
 });
 
-// Сервер автоматически запускается
+// Сервер работает, можно вызывать методы:
 // GET http://localhost:3000/health-check - проверка состояния
 // POST http://localhost:3000/hello - вызов метода
+
+// Тот же экземпляр можно использовать как клиент для вызовов других сервисов:
+const result = await rpc.request(
+  'http://localhost:3001', 
+  'remoteMethod', 
+  { data: 'test' }
+);
+console.log(result); // { data: { ... } }
 ```
 
-## Использование клиента
+## Только клиент (без сервера)
 
 ```javascript
 const Http2RPC = require('rpcmate');
 
+// Создание только клиента (без методов = без сервера)
 const client = new Http2RPC();
 
 // Вызов удаленного метода
@@ -46,6 +55,23 @@ const result = await client.request(
 );
 
 console.log(result); // { data: { message: "Hello, World!" } }
+```
+
+## Пустой сервер (без методов)
+
+```javascript
+const Http2RPC = require('rpcmate');
+
+// Запуск пустого сервера (методы можно добавить позже)
+const rpc = new Http2RPC({ 
+  port: 3000, 
+  startServer: true 
+});
+
+// Добавление методов после создания
+rpc.addMethod('newMethod', async (params) => {
+  return { status: 'ok', data: params };
+});
 ```
 
 ## API
@@ -62,6 +88,7 @@ new Http2RPC(options)
 |----------|-----|--------------|----------|
 | `port` | number | 3000 | Порт сервера |
 | `host` | string | 'localhost' | Хост сервера |
+| `startServer` | boolean | auto | Запуск сервера (auto = true если есть методы) |
 | `logger` | object | console | Объект логгера |
 | `cors` | boolean | true | Включить CORS |
 | `corsOptions` | object | {...} | CORS настройки |

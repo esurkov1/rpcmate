@@ -50,7 +50,12 @@ class Http2RPC {
     }
 
     this._setupGracefulShutdown();
-    this.start();
+    
+    // Запускаем сервер только если есть методы или явно указано startServer: true
+    const shouldStartServer = options.methods || options.startServer === true;
+    if (shouldStartServer) {
+      this.start();
+    }
   }
 
   get methods() {
