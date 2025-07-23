@@ -1,10 +1,10 @@
 {
   "name": "rpcmate",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Lightweight HTTP/2 RPC server with JWT authentication and retry mechanism",
-  "main": "http2rpc.js",
+  "main": "index.js",
   "scripts": {
-    "start": "node http2rpc.js",
+    "start": "node index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [
