@@ -49,6 +49,7 @@ class Http2RPC {
       });
     }
 
+    this._setupGracefulShutdown = this.#setupGracefulShutdown.bind(this);
     this._setupGracefulShutdown();
     
     // Запускаем сервер только если есть методы или явно указано startServer: true
@@ -117,15 +118,15 @@ class Http2RPC {
         
         const shouldRetry = this.#shouldRetry(error, retryOn);
         if (!shouldRetry) {
-          this.logger.info(`Not retrying due to error type: ${error.message}`);
+          this.logger.info(`Not retrying due to error type: ${error.message || error.code}`);
           break;
         }
         
-        this.logger.warn(`Request failed (attempt ${attempt + 1}/${maxRetries + 1}): ${error.message}`);
+        this.logger.warn(`Request failed (attempt ${attempt + 1}/${maxRetries + 1}): ${error.message || error.code}`);
       }
     }
 
-    this.logger.error(`Request failed after ${maxRetries + 1} attempts: ${lastError.message}`);
+    this.logger.error(`Request failed after ${maxRetries + 1} attempts: ${lastError.message || lastError.code}`);
     throw lastError;
   }
 
@@ -462,6 +463,15 @@ class Http2RPC {
       const req = client.request(headers);
       let responseData = '';
 
+      const handleError = (error) => {
+        client.close();
+        const enhancedError = new Error(error.message || 'HTTP/2 Request Error');
+        enhancedError.code = error.code || 'UNKNOWN_ERROR';
+        enhancedError.status = error.status || 500;
+        enhancedError.originalError = error;
+        reject(enhancedError);
+      };
+
       req.on('data', (chunk) => { responseData += chunk; });
       
       req.on('end', () => {
@@ -470,14 +480,16 @@ class Http2RPC {
           const response = JSON.parse(responseData);
           resolve(response);
         } catch (error) {
-          reject(new Error(`Failed to parse response: ${error.message}`));
+          const parseError = new Error(`Failed to parse response: ${error.message}`);
+          parseError.status = 500;
+          parseError.code = 'PARSE_ERROR';
+          reject(parseError);
         }
       });
 
-      req.on('error', (error) => {
-        client.close();
-        reject(error);
-      });
+      req.on('error', handleError);
+      req.on('frameError', handleError);
+      req.on('goaway', handleError);
 
       req.on('response', (headers) => {
         const status = headers[':status'];
@@ -485,6 +497,8 @@ class Http2RPC {
           const error = new Error(`HTTP ${status}`);
           error.status = status;
           error.response = responseData;
+          error.code = `HTTP_${status}`;
+          client.close();
           reject(error);
         }
       });
@@ -494,12 +508,24 @@ class Http2RPC {
   }
 
   #shouldRetry(error, retryOn) {
-    if (error.status && retryOn.includes(error.status)) {
+    // Расширенная логика retry
+    const retryStatuses = retryOn || [500, 502, 503, 504];
+    const networkErrorCodes = [
+      'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 
+      'EHOSTUNREACH', 'ENETUNREACH', 'ERR_HTTP2_ERROR'
+    ];
+
+    // Retry по статус-коду
+    if (error.status && retryStatuses.includes(error.status)) {
       return true;
     }
-    
-    const networkErrors = ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND'];
-    return networkErrors.includes(error.code);
+
+    // Retry по коду ошибки
+    if (error.code && networkErrorCodes.includes(error.code)) {
+      return true;
+    }
+
+    return false;
   }
 
   #sleep(ms) {

@@ -4,8 +4,7 @@
   "description": "Lightweight HTTP/2 RPC server with JWT authentication and retry mechanism",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test"
   },
   "keywords": [
     "http2",
@@ -17,7 +16,7 @@
     "rest",
     "nodejs"
   ],
-  "author": "Eugene Surkov <esurkov1@gmail.com>",
+  "author": "Eugene Surkov",
   "license": "MIT",
   "engines": {
     "node": ">=14.0.0"
@@ -26,8 +25,8 @@
     "type": "git",
     "url": "git+https://github.com/esurkov1/rpcmate.git"
   },
-      "bugs": {
-      "url": "https://github.com/esurkov1/rpcmate/issues"
-    },
-    "homepage": "https://github.com/esurkov1/rpcmate#readme"
+  "bugs": {
+    "url": "https://github.com/esurkov1/rpcmate/issues"
+  },
+  "homepage": "https://github.com/esurkov1/rpcmate#readme"
 }
