@@ -9,7 +9,7 @@ class Http2RPC {
     this._methods = {};
     this.server = null;
     
-    this.logger = options.logger || console;
+    this.logger = options.logger || this.#logger();
     
     this.cors = options.cors !== false;
     this.corsOptions = {
@@ -59,6 +59,22 @@ class Http2RPC {
     }
   }
 
+  #logger() {
+    const prefix = '[RPC]';
+    const logger = (type) => (msg, meta = {}) => {
+        const logMethod = console[type] || console.log;
+        logMethod(`${prefix} ${msg}`, meta);
+    };
+
+    return {
+        log: logger('log'),
+        info: logger('info'),
+        error: logger('error'),
+        warn: logger('warn'),
+        debug: logger('debug')
+    };
+}
+
   get methods() {
     return this._methods;
   }
@@ -91,6 +107,12 @@ class Http2RPC {
     const requestOptions = { ...this.retryOptions, ...options };
     const { maxRetries, initialDelay, maxDelay, backoffFactor, retryOn } = requestOptions;
     
+    this.logger.info(`Initiating request to ${serviceUrl}/${methodName}`, {
+      methodName,
+      params: Object.keys(params),
+      retryConfig: { maxRetries, initialDelay, maxDelay, backoffFactor }
+    });
+    
     let lastError;
     let delay = initialDelay;
 
@@ -109,6 +131,12 @@ class Http2RPC {
           this.logger.info(`Request succeeded on attempt ${attempt + 1}`);
         }
         
+        this.logger.debug(`Request to ${methodName} successful`, {
+          serviceUrl,
+          resultType: typeof result,
+          resultKeys: result ? Object.keys(result) : null
+        });
+        
         return result;
         
       } catch (error) {
@@ -118,33 +146,64 @@ class Http2RPC {
         
         const shouldRetry = this.#shouldRetry(error, retryOn);
         if (!shouldRetry) {
-          this.logger.info(`Not retrying due to error type: ${error.message || error.code}`);
+          this.logger.info(`Not retrying due to error type: ${error.message || error.code}`, {
+            errorCode: error.code,
+            errorStatus: error.status
+          });
           break;
         }
         
-        this.logger.warn(`Request failed (attempt ${attempt + 1}/${maxRetries + 1}): ${error.message || error.code}`);
+        this.logger.warn(`Request failed (attempt ${attempt + 1}/${maxRetries + 1})`, {
+          methodName,
+          errorMessage: error.message,
+          errorCode: error.code,
+          errorStatus: error.status
+        });
       }
     }
 
-    this.logger.error(`Request failed after ${maxRetries + 1} attempts: ${lastError.message || lastError.code}`);
+    this.logger.error(`Request failed after ${maxRetries + 1} attempts`, {
+      methodName,
+      serviceUrl,
+      finalError: {
+        message: lastError.message,
+        code: lastError.code,
+        status: lastError.status
+      }
+    });
     throw lastError;
   }
 
   async start() {
     return new Promise((resolve, reject) => {
+      this.logger.info(`Initializing RPC server with options:`, {
+        port: this.port,
+        host: this.host,
+        methods: Object.keys(this._methods),
+        corsEnabled: this.cors,
+        jwtAuthEnabled: this.jwtAuth
+      });
+
       this.server = http2.createServer((req, res) => {
         this.#handleRequest(req, res);
       });
 
       this.server.on('error', (error) => {
-        this.logger.error('Server error:', error);
+        this.logger.error('Server initialization failed:', { 
+          errorMessage: error.message, 
+          errorCode: error.code 
+        });
         reject(error);
       });
 
       this.server.listen(this.port, this.host, () => {
         this.logger.info(`RPC Server running on ${this.host}:${this.port}`);
         if (this.jwtAuth) {
-          this.logger.info('JWT RS256 authentication enabled');
+          this.logger.info('JWT RS256 authentication enabled', {
+            issuer: this.jwtIssuer,
+            audience: this.jwtAudience,
+            excludedPaths: Array.from(this.excludedPaths)
+          });
         }
         resolve(this.server);
       });
@@ -208,13 +267,26 @@ class Http2RPC {
     try {
       const [headerB64, payloadB64, signatureB64] = token.split('.');
       if (!headerB64 || !payloadB64 || !signatureB64) {
+        this.logger.warn('Invalid token format', { tokenLength: token.length });
         throw new Error('Invalid token format');
       }
 
       const header = JSON.parse(Buffer.from(headerB64, 'base64url').toString());
       const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString());
 
+      this.logger.debug('JWT token details', {
+        algorithm: header.alg,
+        issuer: payload.iss,
+        audience: payload.aud,
+        expiresAt: payload.exp ? new Date(payload.exp * 1000).toISOString() : 'N/A',
+        notBefore: payload.nbf ? new Date(payload.nbf * 1000).toISOString() : 'N/A'
+      });
+
       if (header.alg !== 'RS256') {
+        this.logger.warn('Invalid JWT algorithm', { 
+          expectedAlg: 'RS256', 
+          actualAlg: header.alg 
+        });
         throw new Error('Invalid algorithm');
       }
 
@@ -225,29 +297,50 @@ class Http2RPC {
       verifier.update(signatureData);
       
       if (!verifier.verify(this.jwtPublicKey, signature)) {
+        this.logger.warn('JWT signature verification failed');
         throw new Error('Invalid signature');
       }
 
       const now = Math.floor(Date.now() / 1000);
       if (payload.exp && payload.exp < now) {
+        this.logger.warn('JWT token expired', {
+          expiresAt: new Date(payload.exp * 1000).toISOString(),
+          currentTime: new Date().toISOString()
+        });
         throw new Error('Token expired');
       }
       
       if (payload.nbf && payload.nbf > now) {
+        this.logger.warn('JWT token not yet valid', {
+          notBefore: new Date(payload.nbf * 1000).toISOString(),
+          currentTime: new Date().toISOString()
+        });
         throw new Error('Token not yet valid');
       }
 
       if (this.jwtIssuer && payload.iss !== this.jwtIssuer) {
+        this.logger.warn('Invalid JWT issuer', {
+          expectedIssuer: this.jwtIssuer,
+          actualIssuer: payload.iss
+        });
         throw new Error('Invalid issuer');
       }
       
       if (this.jwtAudience && payload.aud !== this.jwtAudience) {
+        this.logger.warn('Invalid JWT audience', {
+          expectedAudience: this.jwtAudience,
+          actualAudience: payload.aud
+        });
         throw new Error('Invalid audience');
       }
 
+      this.logger.info('JWT token validated successfully');
       return { valid: true, payload };
     } catch (error) {
-      this.logger.warn('JWT validation failed:', error.message);
+      this.logger.warn('JWT validation failed', {
+        errorMessage: error.message,
+        errorType: error.constructor.name
+      });
       return { valid: false, error: error.message };
     }
   }
