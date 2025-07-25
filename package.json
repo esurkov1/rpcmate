@@ -28,5 +28,9 @@
   "bugs": {
     "url": "https://github.com/esurkov1/rpcmate/issues"
   },
-  "homepage": "https://github.com/esurkov1/rpcmate#readme"
+  "homepage": "https://github.com/esurkov1/rpcmate#readme",
+  "dependencies": {
+    "pino": "^8.0.0",
+    "pino-pretty": "^10.0.0"
+  }
 }

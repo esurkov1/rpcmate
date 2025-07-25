@@ -1,6 +1,7 @@
 const http2 = require('http2');
 const url = require('url');
 const crypto = require('crypto');
+const pino = require('pino');
 
 class Http2RPC {
   constructor(options = {}) {
@@ -9,7 +10,15 @@ class Http2RPC {
     this._methods = {};
     this.server = null;
     
-    this.logger = options.logger || this.#logger();
+    // Logger configuration
+    const loggerConfig = {
+      title: this.constructor.name,
+      level: 'info',
+      isDev: true,
+      ...options.logger
+    };
+    
+    this.logger = this.#createLogger(loggerConfig);
     
     this.cors = options.cors !== false;
     this.corsOptions = {
@@ -52,28 +61,35 @@ class Http2RPC {
     this._setupGracefulShutdown = this.#setupGracefulShutdown.bind(this);
     this._setupGracefulShutdown();
     
-    // Запускаем сервер только если есть методы или явно указано startServer: true
+    // Start server only if methods are provided or explicitly requested
     const shouldStartServer = options.methods || options.startServer === true;
     if (shouldStartServer) {
       this.start();
     }
   }
 
-  #logger() {
-    const prefix = '[RPC]';
-    const logger = (type) => (msg, meta = {}) => {
-        const logMethod = console[type] || console.log;
-        logMethod(`${prefix} ${msg}`, meta);
+  #createLogger(config) {
+    const baseOptions = {
+      name: config.title,
+      level: config.level
     };
 
-    return {
-        log: logger('log'),
-        info: logger('info'),
-        error: logger('error'),
-        warn: logger('warn'),
-        debug: logger('debug')
-    };
-}
+    if (config.isDev) {
+      return pino({
+        ...baseOptions,
+        transport: {
+          target: 'pino-pretty',
+          options: {
+            colorize: true,
+            translateTime: 'yyyy-mm-dd HH:MM:ss',
+            ignore: 'pid,hostname'
+          }
+        }
+      });
+    }
+
+    return pino(baseOptions);
+  }
 
   get methods() {
     return this._methods;
@@ -99,7 +115,7 @@ class Http2RPC {
     }
     
     this._methods[name] = handler;
-    this.logger.info(`Added method: ${name}`);
+    this.logger.info({ method: name }, 'Method added successfully');
     return this;
   }
 
@@ -107,11 +123,12 @@ class Http2RPC {
     const requestOptions = { ...this.retryOptions, ...options };
     const { maxRetries, initialDelay, maxDelay, backoffFactor, retryOn } = requestOptions;
     
-    this.logger.info(`Initiating request to ${serviceUrl}/${methodName}`, {
+    this.logger.info({
+      serviceUrl,
       methodName,
-      params: Object.keys(params),
+      paramsKeys: Object.keys(params),
       retryConfig: { maxRetries, initialDelay, maxDelay, backoffFactor }
-    });
+    }, 'Initiating RPC request');
     
     let lastError;
     let delay = initialDelay;
@@ -119,7 +136,12 @@ class Http2RPC {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
         if (attempt > 0) {
-          this.logger.info(`Retry attempt ${attempt}/${maxRetries} for ${methodName} after ${delay}ms`);
+          this.logger.info({
+            attempt,
+            maxRetries,
+            methodName,
+            delay
+          }, 'Retrying request after delay');
           await this.#sleep(delay);
           delay = Math.min(delay * backoffFactor, maxDelay);
           this.metrics.retryCount++;
@@ -128,14 +150,15 @@ class Http2RPC {
         const result = await this.#makeRequest(serviceUrl, methodName, params, options);
         
         if (attempt > 0) {
-          this.logger.info(`Request succeeded on attempt ${attempt + 1}`);
+          this.logger.info({ attempt: attempt + 1, methodName }, 'Request succeeded after retry');
         }
         
-        this.logger.debug(`Request to ${methodName} successful`, {
+        this.logger.debug({
           serviceUrl,
+          methodName,
           resultType: typeof result,
-          resultKeys: result ? Object.keys(result) : null
-        });
+          resultKeys: result && typeof result === 'object' ? Object.keys(result) : null
+        }, 'Request completed successfully');
         
         return result;
         
@@ -146,64 +169,77 @@ class Http2RPC {
         
         const shouldRetry = this.#shouldRetry(error, retryOn);
         if (!shouldRetry) {
-          this.logger.info(`Not retrying due to error type: ${error.message || error.code}`, {
+          this.logger.warn({
+            methodName,
+            errorMessage: error.message,
             errorCode: error.code,
             errorStatus: error.status
-          });
+          }, 'Request failed, retry not applicable for error type');
           break;
         }
         
-        this.logger.warn(`Request failed (attempt ${attempt + 1}/${maxRetries + 1})`, {
+        this.logger.warn({
           methodName,
+          attempt: attempt + 1,
+          maxAttempts: maxRetries + 1,
           errorMessage: error.message,
           errorCode: error.code,
           errorStatus: error.status
-        });
+        }, 'Request attempt failed, will retry');
       }
     }
 
-    this.logger.error(`Request failed after ${maxRetries + 1} attempts`, {
+    this.logger.error({
       methodName,
       serviceUrl,
+      totalAttempts: maxRetries + 1,
       finalError: {
         message: lastError.message,
         code: lastError.code,
         status: lastError.status
       }
-    });
+    }, 'Request failed after all retry attempts');
     throw lastError;
   }
 
   async start() {
     return new Promise((resolve, reject) => {
-      this.logger.info(`Initializing RPC server with options:`, {
+      this.logger.info({
         port: this.port,
         host: this.host,
+        methodsCount: Object.keys(this._methods).length,
         methods: Object.keys(this._methods),
         corsEnabled: this.cors,
         jwtAuthEnabled: this.jwtAuth
-      });
+      }, 'Initializing HTTP/2 RPC server');
 
       this.server = http2.createServer((req, res) => {
         this.#handleRequest(req, res);
       });
 
       this.server.on('error', (error) => {
-        this.logger.error('Server initialization failed:', { 
-          errorMessage: error.message, 
-          errorCode: error.code 
-        });
+        this.logger.error({
+          errorMessage: error.message,
+          errorCode: error.code,
+          port: this.port,
+          host: this.host
+        }, 'Server initialization failed');
         reject(error);
       });
 
       this.server.listen(this.port, this.host, () => {
-        this.logger.info(`RPC Server running on ${this.host}:${this.port}`);
+        this.logger.info({
+          host: this.host,
+          port: this.port,
+          methodsAvailable: Object.keys(this._methods).length
+        }, 'HTTP/2 RPC server started successfully');
+        
         if (this.jwtAuth) {
-          this.logger.info('JWT RS256 authentication enabled', {
+          this.logger.info({
             issuer: this.jwtIssuer,
             audience: this.jwtAudience,
             excludedPaths: Array.from(this.excludedPaths)
-          });
+          }, 'JWT RS256 authentication enabled');
         }
         resolve(this.server);
       });
@@ -213,12 +249,15 @@ class Http2RPC {
   async stop(timeout = 5000) {
     return new Promise((resolve, reject) => {
       if (!this.server) {
+        this.logger.debug('Stop called but server is not running');
         resolve();
         return;
       }
 
+      this.logger.info({ timeout }, 'Initiating server shutdown');
+      
       const forceShutdown = setTimeout(() => {
-        this.logger.warn('Force closing server due to timeout');
+        this.logger.warn({ timeout }, 'Force closing server due to timeout exceeded');
         this.server.close();
         resolve();
       }, timeout);
@@ -226,7 +265,7 @@ class Http2RPC {
       this.server.close((err) => {
         clearTimeout(forceShutdown);
         if (err) {
-          this.logger.error('Error during server shutdown:', err);
+          this.logger.error({ error: err.message }, 'Error occurred during server shutdown');
           reject(err);
         } else {
           this.logger.info('Server stopped gracefully');
@@ -267,26 +306,26 @@ class Http2RPC {
     try {
       const [headerB64, payloadB64, signatureB64] = token.split('.');
       if (!headerB64 || !payloadB64 || !signatureB64) {
-        this.logger.warn('Invalid token format', { tokenLength: token.length });
+        this.logger.warn({ tokenLength: token.length }, 'JWT token has invalid format');
         throw new Error('Invalid token format');
       }
 
       const header = JSON.parse(Buffer.from(headerB64, 'base64url').toString());
       const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString());
 
-      this.logger.debug('JWT token details', {
+      this.logger.debug({
         algorithm: header.alg,
         issuer: payload.iss,
         audience: payload.aud,
         expiresAt: payload.exp ? new Date(payload.exp * 1000).toISOString() : 'N/A',
         notBefore: payload.nbf ? new Date(payload.nbf * 1000).toISOString() : 'N/A'
-      });
+      }, 'JWT token validation details');
 
       if (header.alg !== 'RS256') {
-        this.logger.warn('Invalid JWT algorithm', { 
-          expectedAlg: 'RS256', 
-          actualAlg: header.alg 
-        });
+        this.logger.warn({
+          expectedAlg: 'RS256',
+          actualAlg: header.alg
+        }, 'JWT algorithm validation failed');
         throw new Error('Invalid algorithm');
       }
 
@@ -303,44 +342,44 @@ class Http2RPC {
 
       const now = Math.floor(Date.now() / 1000);
       if (payload.exp && payload.exp < now) {
-        this.logger.warn('JWT token expired', {
+        this.logger.warn({
           expiresAt: new Date(payload.exp * 1000).toISOString(),
           currentTime: new Date().toISOString()
-        });
+        }, 'JWT token has expired');
         throw new Error('Token expired');
       }
       
       if (payload.nbf && payload.nbf > now) {
-        this.logger.warn('JWT token not yet valid', {
+        this.logger.warn({
           notBefore: new Date(payload.nbf * 1000).toISOString(),
           currentTime: new Date().toISOString()
-        });
+        }, 'JWT token not yet valid');
         throw new Error('Token not yet valid');
       }
 
       if (this.jwtIssuer && payload.iss !== this.jwtIssuer) {
-        this.logger.warn('Invalid JWT issuer', {
+        this.logger.warn({
           expectedIssuer: this.jwtIssuer,
           actualIssuer: payload.iss
-        });
+        }, 'JWT issuer validation failed');
         throw new Error('Invalid issuer');
       }
       
       if (this.jwtAudience && payload.aud !== this.jwtAudience) {
-        this.logger.warn('Invalid JWT audience', {
+        this.logger.warn({
           expectedAudience: this.jwtAudience,
           actualAudience: payload.aud
-        });
+        }, 'JWT audience validation failed');
         throw new Error('Invalid audience');
       }
 
-      this.logger.info('JWT token validated successfully');
+      this.logger.debug('JWT token validated successfully');
       return { valid: true, payload };
     } catch (error) {
-      this.logger.warn('JWT validation failed', {
+      this.logger.warn({
         errorMessage: error.message,
         errorType: error.constructor.name
-      });
+      }, 'JWT token validation failed');
       return { valid: false, error: error.message };
     }
   }
@@ -377,6 +416,7 @@ class Http2RPC {
       auth: this.jwtAuth ? 'JWT RS256' : 'disabled'
     };
     
+    this.logger.debug({ healthData }, 'Health check requested');
     const successResponse = this.#formatResponse(healthData);
     this.#sendResponse(res, 200, successResponse);
   }
@@ -395,6 +435,13 @@ class Http2RPC {
     const parsedUrl = url.parse(req.url, true);
     const pathname = parsedUrl.pathname.slice(1);
 
+    this.logger.debug({
+      method: req.method,
+      url: req.url,
+      pathname,
+      userAgent: req.headers['user-agent']
+    }, 'Incoming request');
+
     if (req.method === 'OPTIONS') {
       this.#setCorsHeaders(res);
       res.writeHead(200);
@@ -409,6 +456,12 @@ class Http2RPC {
 
     const authResult = this.#checkAuth(req, pathname);
     if (!authResult.authorized) {
+      this.logger.warn({
+        pathname,
+        authError: authResult.error,
+        userAgent: req.headers['user-agent']
+      }, 'Authorization failed for request');
+      
       const errorResponse = this.#formatResponse(null, { 
         code: 'UNAUTHORIZED', 
         message: authResult.error 
@@ -422,7 +475,12 @@ class Http2RPC {
     let requestProcessed = false;
 
     req.on('error', (error) => {
-      this.logger.error('Request error:', error);
+      this.logger.error({
+        error: error.message,
+        pathname,
+        requestUrl: req.url
+      }, 'Request stream error occurred');
+      
       if (!requestProcessed && !res.headersSent) {
         requestProcessed = true;
         const errorResponse = this.#formatResponse(null, { 
@@ -440,6 +498,12 @@ class Http2RPC {
       if (body.length > 1024 * 1024) {
         if (!requestProcessed && !res.headersSent) {
           requestProcessed = true;
+          this.logger.warn({
+            pathname,
+            bodySize: body.length,
+            maxSize: 1024 * 1024
+          }, 'Request payload too large');
+          
           const errorResponse = this.#formatResponse(null, { 
             code: 'PAYLOAD_TOO_LARGE', 
             message: 'Request too large', 
@@ -461,6 +525,11 @@ class Http2RPC {
       try {
         const method = this._methods[pathname];
         if (!method) {
+          this.logger.warn({
+            requestedMethod: pathname,
+            availableMethods: Object.keys(this._methods)
+          }, 'Method not found');
+          
           const errorResponse = this.#formatResponse(null, { 
             code: 'METHOD_NOT_FOUND', 
             message: 'Method not found', 
@@ -479,7 +548,12 @@ class Http2RPC {
           try {
             params = JSON.parse(body);
           } catch (parseError) {
-            this.logger.error('JSON parse error:', parseError);
+            this.logger.error({
+              parseError: parseError.message,
+              bodyLength: body.length,
+              pathname
+            }, 'JSON parsing failed for request body');
+            
             const errorResponse = this.#formatResponse(null, { 
               code: 'INVALID_JSON', 
               message: 'Invalid JSON format', 
@@ -495,15 +569,32 @@ class Http2RPC {
           params._user = authResult.user;
         }
 
-        this.logger.info(`Calling method: ${pathname}`, { ...params, _user: undefined });
+        this.logger.info({
+          method: pathname,
+          paramsKeys: Object.keys(params).filter(k => k !== '_user'),
+          hasUser: !!authResult.user
+        }, 'Executing method');
+        
         const result = await method(params);
 
         const successResponse = this.#formatResponse(result);
         this.#sendResponse(res, 200, successResponse);
         this.#updateMetrics(Date.now() - startTime);
         
+        this.logger.debug({
+          method: pathname,
+          responseTime: Date.now() - startTime,
+          resultType: typeof result
+        }, 'Method executed successfully');
+        
       } catch (error) {
-        this.logger.error('Method execution error:', error);
+        this.logger.error({
+          method: pathname,
+          error: error.message,
+          errorStack: error.stack,
+          requestData: body ? { bodyLength: body.length } : null
+        }, 'Method execution failed');
+        
         if (!res.headersSent) {
           const errorResponse = this.#formatResponse(null, { 
             code: 'INTERNAL_ERROR', 
@@ -522,13 +613,13 @@ class Http2RPC {
 
   #setupGracefulShutdown() {
     const gracefulShutdown = async (signal) => {
-      this.logger.info(`Received ${signal}, starting graceful shutdown...`);
+      this.logger.info({ signal }, 'Received shutdown signal, starting graceful shutdown');
       try {
         await this.stop();
-        this.logger.info('Graceful shutdown completed');
+        this.logger.info('Graceful shutdown completed successfully');
         process.exit(0);
       } catch (error) {
-        this.logger.error('Error during shutdown:', error);
+        this.logger.error({ error: error.message }, 'Error occurred during shutdown');
         process.exit(1);
       }
     };
@@ -601,19 +692,18 @@ class Http2RPC {
   }
 
   #shouldRetry(error, retryOn) {
-    // Расширенная логика retry
     const retryStatuses = retryOn || [500, 502, 503, 504];
     const networkErrorCodes = [
       'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 
       'EHOSTUNREACH', 'ENETUNREACH', 'ERR_HTTP2_ERROR'
     ];
 
-    // Retry по статус-коду
+    // Retry by status code
     if (error.status && retryStatuses.includes(error.status)) {
       return true;
     }
 
-    // Retry по коду ошибки
+    // Retry by error code
     if (error.code && networkErrorCodes.includes(error.code)) {
       return true;
     }
