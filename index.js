@@ -3,7 +3,7 @@ const url = require('url');
 const crypto = require('crypto');
 const pino = require('pino');
 
-class Http2RPC {
+class RPCMate {
   constructor(options = {}) {
     this.port = options.port || 3000;
     this.host = options.host || 'localhost';
@@ -407,10 +407,38 @@ class Http2RPC {
 
   #handleHealthCheck(res) {
     const uptime = Date.now() - this.metrics.startTime;
+    
+    // Определяем режим работы RPC
+    const hasServerMethods = Object.keys(this._methods).length > 0;
+    const isServerRunning = this.server && this.server.listening;
+    
+    let rpcStatus;
+    if (hasServerMethods) {
+      // Режим сервера или клиент+сервер - нужен запущенный сервер
+      rpcStatus = isServerRunning ? {
+        status: "ok",
+        mode: "server",
+        details: "RPC server is running and accepting requests"
+      } : {
+        status: "error", 
+        error: "RPC server is not initialized",
+        details: "RPC server is not available",
+        critical: true
+      };
+    } else {
+      // Режим только клиента - сервер не нужен
+      rpcStatus = {
+        status: "ok",
+        mode: "client-only", 
+        details: "RPC client mode - server not required"
+      };
+    }
+    
     const healthData = {
       status: 'ok',
       uptime: uptime,
       timestamp: new Date().toISOString(),
+      rpc: rpcStatus,
       metrics: this.metrics,
       methods: Object.keys(this._methods),
       auth: this.jwtAuth ? 'JWT RS256' : 'disabled'
@@ -716,4 +744,4 @@ class Http2RPC {
   }
 }
 
-module.exports = Http2RPC; 
+module.exports = RPCMate; 

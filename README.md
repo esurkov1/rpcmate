@@ -30,10 +30,10 @@ npm install rpcmate
 ## Quick Start
 
 ```javascript
-const Http2RPC = require('rpcmate');
+const RPCMate = require('rpcmate');
 
 // Create server instance
-const server = new Http2RPC({
+const server = new RPCMate({
   port: 3000,
   host: 'localhost'
 });
@@ -56,7 +56,7 @@ console.log('User:', result.data);
 
 ### Basic Configuration
 ```javascript
-const server = new Http2RPC({
+const server = new RPCMate({
   port: 3000,                    // Server port (default: 3000)
   host: 'localhost',             // Server host (default: 'localhost')
   startServer: true,             // Auto-start server (default: false)
@@ -72,7 +72,7 @@ const server = new Http2RPC({
 
 ### CORS Configuration
 ```javascript
-const server = new Http2RPC({
+const server = new RPCMate({
   cors: true,                    // Enable CORS (default: true)
   corsOptions: {
     origin: '*',                 // Allowed origins
@@ -84,7 +84,7 @@ const server = new Http2RPC({
 
 ### JWT Authentication
 ```javascript
-const server = new Http2RPC({
+const server = new RPCMate({
   jwtAuth: true,
   jwtPublicKey: fs.readFileSync('public-key.pem'),
   jwtIssuer: 'your-issuer',
@@ -95,7 +95,7 @@ const server = new Http2RPC({
 
 ### Retry Configuration
 ```javascript
-const server = new Http2RPC({
+const server = new RPCMate({
   retryOptions: {
     maxRetries: 5,               // Maximum retry attempts (default: 3)
     initialDelay: 1000,          // Initial delay in ms (default: 500)
@@ -108,7 +108,7 @@ const server = new Http2RPC({
 
 ### Methods in Constructor
 ```javascript
-const server = new Http2RPC({
+const server = new RPCMate({
   methods: {
     'getUser': async (params) => ({ id: params.id, name: 'User' }),
     'createUser': async (params) => ({ id: Date.now(), ...params })
@@ -120,7 +120,7 @@ const server = new Http2RPC({
 
 ### Constructor
 ```javascript
-new Http2RPC(options)
+new RPCMate(options)
 ```
 
 **Parameters:**
@@ -219,7 +219,7 @@ server.methods = {
 ```javascript
 const fs = require('fs');
 
-const server = new Http2RPC({
+const server = new RPCMate({
   jwtAuth: true,
   jwtPublicKey: fs.readFileSync('path/to/public-key.pem'),
   jwtIssuer: 'your-service',
@@ -241,10 +241,10 @@ server.addMethod('getUserProfile', async (params) => {
 
 ### Microservice with Full Configuration
 ```javascript
-const Http2RPC = require('rpcmate');
+const RPCMate = require('rpcmate');
 const fs = require('fs');
 
-const server = new Http2RPC({
+const server = new RPCMate({
   port: process.env.PORT || 3000,
   host: process.env.HOST || '0.0.0.0',
   
@@ -293,6 +293,11 @@ Response:
     "status": "ok",
     "uptime": 3600000,
     "timestamp": "2024-01-15T12:00:00.000Z",
+    "rpc": {
+      "status": "ok", 
+      "mode": "server",
+      "details": "RPC server is running and accepting requests"
+    },
     "metrics": {
       "requestCount": 150,
       "errorCount": 5,
@@ -304,10 +309,42 @@ Response:
 }
 ```
 
+#### Health Check Modes
+
+RPCMate автоматически определяет режим работы и возвращает соответствующий статус:
+
+1. **Режим Server**: когда есть зарегистрированные методы и сервер запущен
+```json
+"rpc": {
+  "status": "ok",
+  "mode": "server",
+  "details": "RPC server is running and accepting requests"
+}
+```
+
+2. **Режим Client-only**: когда нет зарегистрированных методов (только отправка запросов)
+```json
+"rpc": {
+  "status": "ok",
+  "mode": "client-only", 
+  "details": "RPC client mode - server not required"
+}
+```
+
+3. **Ошибка инициализации сервера**: когда есть зарегистрированные методы, но сервер не запущен
+```json
+"rpc": {
+  "status": "error", 
+  "error": "RPC server is not initialized",
+  "details": "RPC server is not available",
+  "critical": true
+}
+```
+
 ### Client Request with Retry
 ```javascript
 // Client making requests with automatic retry
-const client = new Http2RPC();
+const client = new RPCMate();
 
 try {
   const result = await client.request(
