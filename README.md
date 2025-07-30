@@ -24,6 +24,9 @@ RPCMate is a production-ready Node.js library that simplifies building HTTP/2 RP
 - **Structured Logging** with Pino (development and production modes)
 - **Simple API** for quick integration
 - **TypeScript Ready** (types included)
+- **Enhanced Validation** - Comprehensive input validation and error handling
+- **Performance Optimized** - Efficient resource management and connection pooling
+- **Comprehensive Testing** - Full test coverage with unit and integration tests
 
 ## Installation
 
@@ -614,6 +617,51 @@ All responses follow a consistent format:
   "details": "Additional error context"
 }
 ```
+
+## Testing
+
+RPCMate includes comprehensive test coverage with both unit and integration tests. All tests are designed to validate the resilience patterns, security features, and performance characteristics.
+
+### Running Tests
+
+```bash
+# Run all tests
+npm test
+
+# Run specific test files
+npm run test:basic
+npm run test:integration
+
+# Run tests with coverage
+npm run test:coverage
+```
+
+### Test Coverage
+
+- **Unit Tests**: Constructor validation, method management, resilience patterns, metrics
+- **Integration Tests**: Microservice communication, real-world scenarios, performance testing
+- **Security Tests**: JWT authentication, input validation, error handling
+- **Performance Tests**: Load testing, concurrent request handling, resource management
+
+## Version History
+
+### v1.3.0 (Latest)
+- ✅ Enhanced input validation and error handling
+- ✅ Improved HTTP/2 connection management
+- ✅ Performance optimizations and memory leak fixes
+- ✅ Comprehensive test coverage
+- ✅ TypeScript definitions included
+- ✅ Better resilience pattern implementations
+
+### v1.2.0
+- JWT RS256 authentication support
+- Circuit breaker and bulkhead patterns
+- Enhanced retry mechanism with jitter
+- Structured logging with Pino
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request. For major changes, please open an issue first to discuss what you would like to change.
 
 ## License
 
