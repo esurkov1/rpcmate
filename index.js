@@ -3,7 +3,7 @@ const url = require('url');
 const crypto = require('crypto');
 const pino = require('pino');
 
-class RPCMate {
+class Http2RPC {
   constructor(options = {}) {
     this.port = options.port || 3000;
     this.host = options.host || 'localhost';
@@ -34,13 +34,54 @@ class RPCMate {
     this.jwtAudience = options.jwtAudience || null;
     this.excludedPaths = new Set(['health-check', ...(options.excludedPaths || [])]);
     
-    this.retryOptions = {
-      maxRetries: 3,
-      initialDelay: 500,
-      maxDelay: 10000,
-      backoffFactor: 2,
-      retryOn: [500, 502, 503, 504],
-      ...options.retryOptions
+    // Resilience patterns configuration
+    this.resilience = {
+      // Timeout pattern
+      timeout: {
+        enabled: true,
+        requestTimeout: 30000,        // 30 seconds default
+        connectionTimeout: 5000,      // 5 seconds connection timeout
+        ...options.resilience?.timeout
+      },
+      
+      // Bulkhead pattern
+      bulkhead: {
+        enabled: true,
+        maxConcurrentRequests: 100,   // Max concurrent requests
+        maxQueueSize: 200,            // Max queued requests
+        ...options.resilience?.bulkhead
+      },
+      
+      // Circuit breaker pattern
+      circuitBreaker: {
+        enabled: true,
+        failureThreshold: 5,          // Failures before opening
+        recoveryTimeout: 60000,       // Time to wait before half-open (60s)
+        successThreshold: 3,          // Successes to close circuit
+        ...options.resilience?.circuitBreaker
+      },
+      
+      // Enhanced retry pattern
+      retry: {
+        maxRetries: 3,
+        initialDelay: 500,
+        maxDelay: 10000,
+        backoffFactor: 2,
+        retryOn: [500, 502, 503, 504],
+        jitterEnabled: true,          // Add jitter to delays
+        ...options.resilience?.retry,
+        ...options.retryOptions       // Backward compatibility
+      }
+    };
+    
+    // Circuit breaker state management
+    this.circuitBreakers = new Map(); // serviceUrl -> circuit state
+    
+    // Bulkhead state management
+    this.bulkheadState = {
+      activeRequests: 0,
+      queuedRequests: [],
+      rejectedRequests: 0
     };
     
     this.metrics = {
@@ -49,7 +90,12 @@ class RPCMate {
       averageResponseTime: 0,
       startTime: Date.now(),
       retryCount: 0,
-      authFailures: 0
+      authFailures: 0,
+      // Resilience metrics
+      timeoutCount: 0,
+      circuitBreakerTrips: 0,
+      bulkheadRejections: 0,
+      circuitBreakerState: {}
     };
 
     if (options.methods) {
@@ -119,87 +165,308 @@ class RPCMate {
     return this;
   }
 
+  // Resilience Pattern: Circuit Breaker
+  #getCircuitBreakerState(serviceUrl) {
+    if (!this.circuitBreakers.has(serviceUrl)) {
+      this.circuitBreakers.set(serviceUrl, {
+        state: 'CLOSED',        // CLOSED, OPEN, HALF_OPEN
+        failureCount: 0,
+        successCount: 0,
+        lastFailureTime: 0,
+        nextAttemptTime: 0
+      });
+    }
+    return this.circuitBreakers.get(serviceUrl);
+  }
+
+  #updateCircuitBreakerOnSuccess(serviceUrl) {
+    const circuit = this.#getCircuitBreakerState(serviceUrl);
+    const config = this.resilience.circuitBreaker;
+    
+    if (circuit.state === 'HALF_OPEN') {
+      circuit.successCount++;
+      if (circuit.successCount >= config.successThreshold) {
+        circuit.state = 'CLOSED';
+        circuit.failureCount = 0;
+        circuit.successCount = 0;
+        this.logger.info({ serviceUrl }, 'Circuit breaker closed after successful recovery');
+      }
+    } else if (circuit.state === 'CLOSED') {
+      circuit.failureCount = 0; // Reset failure count on success
+    }
+  }
+
+  #updateCircuitBreakerOnFailure(serviceUrl, error) {
+    const circuit = this.#getCircuitBreakerState(serviceUrl);
+    const config = this.resilience.circuitBreaker;
+    
+    circuit.failureCount++;
+    circuit.lastFailureTime = Date.now();
+    circuit.successCount = 0;
+    
+    if (circuit.state === 'CLOSED' && circuit.failureCount >= config.failureThreshold) {
+      circuit.state = 'OPEN';
+      circuit.nextAttemptTime = Date.now() + config.recoveryTimeout;
+      this.metrics.circuitBreakerTrips++;
+      this.logger.warn({
+        serviceUrl,
+        failureCount: circuit.failureCount,
+        error: error.message
+      }, 'Circuit breaker opened due to failures');
+    } else if (circuit.state === 'HALF_OPEN') {
+      circuit.state = 'OPEN';
+      circuit.nextAttemptTime = Date.now() + config.recoveryTimeout;
+      this.logger.warn({ serviceUrl }, 'Circuit breaker reopened after half-open failure');
+    }
+  }
+
+  #checkCircuitBreaker(serviceUrl) {
+    if (!this.resilience.circuitBreaker.enabled) return { allowed: true };
+    
+    const circuit = this.#getCircuitBreakerState(serviceUrl);
+    const now = Date.now();
+    
+    if (circuit.state === 'OPEN') {
+      if (now >= circuit.nextAttemptTime) {
+        circuit.state = 'HALF_OPEN';
+        circuit.successCount = 0;
+        this.logger.info({ serviceUrl }, 'Circuit breaker entering half-open state');
+        return { allowed: true };
+      }
+      return { 
+        allowed: false, 
+        error: new Error(`Circuit breaker is OPEN for ${serviceUrl}`)
+      };
+    }
+    
+    return { allowed: true };
+  }
+
+  // Resilience Pattern: Bulkhead
+  async #acquireBulkheadPermit() {
+    if (!this.resilience.bulkhead.enabled) return { acquired: true };
+    
+    const config = this.resilience.bulkhead;
+    
+    if (this.bulkheadState.activeRequests < config.maxConcurrentRequests) {
+      this.bulkheadState.activeRequests++;
+      return { acquired: true };
+    }
+    
+    if (this.bulkheadState.queuedRequests.length < config.maxQueueSize) {
+      return new Promise((resolve, reject) => {
+        const timeoutId = setTimeout(() => {
+          const index = this.bulkheadState.queuedRequests.findIndex(item => item.resolve === resolve);
+          if (index !== -1) {
+            this.bulkheadState.queuedRequests.splice(index, 1);
+          }
+          reject(new Error('Bulkhead queue timeout'));
+        }, 10000); // 10 second queue timeout
+        
+        this.bulkheadState.queuedRequests.push({ 
+          resolve: (result) => {
+            clearTimeout(timeoutId);
+            resolve(result);
+          },
+          reject: (error) => {
+            clearTimeout(timeoutId);
+            reject(error);
+          }
+        });
+      });
+    }
+    
+    this.bulkheadState.rejectedRequests++;
+    this.metrics.bulkheadRejections++;
+    throw new Error('Bulkhead capacity exceeded - request rejected');
+  }
+
+  #releaseBulkheadPermit() {
+    if (!this.resilience.bulkhead.enabled) return;
+    
+    this.bulkheadState.activeRequests--;
+    
+    if (this.bulkheadState.queuedRequests.length > 0) {
+      const next = this.bulkheadState.queuedRequests.shift();
+      this.bulkheadState.activeRequests++;
+      next.resolve({ acquired: true });
+    }
+  }
+
+  // Resilience Pattern: Enhanced Retry with Jitter
+  #calculateRetryDelay(attempt, config) {
+    let delay = config.initialDelay * Math.pow(config.backoffFactor, attempt);
+    delay = Math.min(delay, config.maxDelay);
+    
+    if (config.jitterEnabled) {
+      // Add ±25% jitter to prevent thundering herd
+      const jitter = delay * 0.25 * (Math.random() - 0.5) * 2;
+      delay += jitter;
+    }
+    
+    return Math.max(delay, 0);
+  }
+
+  // Resilience Pattern: Timeout
+  #createTimeoutPromise(timeout, operation) {
+    return new Promise((resolve, reject) => {
+      const timeoutId = setTimeout(() => {
+        this.metrics.timeoutCount++;
+        reject(new Error(`Request timeout after ${timeout}ms`));
+      }, timeout);
+      
+      operation.then(
+        (result) => {
+          clearTimeout(timeoutId);
+          resolve(result);
+        },
+        (error) => {
+          clearTimeout(timeoutId);
+          reject(error);
+        }
+      );
+    });
+  }
+
   async request(serviceUrl, methodName, params = {}, options = {}) {
-    const requestOptions = { ...this.retryOptions, ...options };
-    const { maxRetries, initialDelay, maxDelay, backoffFactor, retryOn } = requestOptions;
+    // Merge resilience configuration
+    const retryConfig = { ...this.resilience.retry, ...options.retryOptions, ...options };
+    const { maxRetries, retryOn } = retryConfig;
     
     this.logger.info({
       serviceUrl,
       methodName,
       paramsKeys: Object.keys(params),
-      retryConfig: { maxRetries, initialDelay, maxDelay, backoffFactor }
-    }, 'Initiating RPC request');
+      resilience: {
+        circuitBreakerEnabled: this.resilience.circuitBreaker.enabled,
+        bulkheadEnabled: this.resilience.bulkhead.enabled,
+        timeoutEnabled: this.resilience.timeout.enabled,
+        retryEnabled: maxRetries > 0
+      }
+    }, 'Initiating resilient RPC request');
     
-    let lastError;
-    let delay = initialDelay;
+    // Step 1: Bulkhead Pattern - Acquire resource permit
+    let bulkheadPermit;
+    try {
+      bulkheadPermit = await this.#acquireBulkheadPermit();
+    } catch (error) {
+      this.logger.warn({ serviceUrl, methodName, error: error.message }, 'Bulkhead rejected request');
+      throw error;
+    }
+    
+    try {
+      // Step 2: Circuit Breaker Pattern - Check if service is available
+      const circuitCheck = this.#checkCircuitBreaker(serviceUrl);
+      if (!circuitCheck.allowed) {
+        this.logger.warn({ serviceUrl, methodName }, 'Circuit breaker blocked request');
+        throw circuitCheck.error;
+      }
+      
+      let lastError;
+      
+      // Step 3 & 4: Enhanced Retry Pattern with Timeout
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+          if (attempt > 0) {
+            const delay = this.#calculateRetryDelay(attempt - 1, retryConfig);
+            this.logger.info({
+              attempt,
+              maxRetries,
+              methodName,
+              delay,
+              withJitter: retryConfig.jitterEnabled
+            }, 'Retrying request after enhanced delay');
+            await this.#sleep(delay);
+            this.metrics.retryCount++;
+          }
 
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      try {
-        if (attempt > 0) {
-          this.logger.info({
-            attempt,
-            maxRetries,
+          // Execute request with timeout wrapper
+          const requestPromise = this.#makeRequest(serviceUrl, methodName, params, options);
+          const result = this.resilience.timeout.enabled 
+            ? await this.#createTimeoutPromise(this.resilience.timeout.requestTimeout, requestPromise)
+            : await requestPromise;
+          
+          // Success: Update circuit breaker and return result
+          this.#updateCircuitBreakerOnSuccess(serviceUrl);
+          
+          if (attempt > 0) {
+            this.logger.info({ 
+              attempt: attempt + 1, 
+              methodName, 
+              serviceUrl 
+            }, 'Request succeeded after retry with resilience patterns');
+          }
+          
+          this.logger.debug({
+            serviceUrl,
             methodName,
-            delay
-          }, 'Retrying request after delay');
-          await this.#sleep(delay);
-          delay = Math.min(delay * backoffFactor, maxDelay);
-          this.metrics.retryCount++;
-        }
-
-        const result = await this.#makeRequest(serviceUrl, methodName, params, options);
-        
-        if (attempt > 0) {
-          this.logger.info({ attempt: attempt + 1, methodName }, 'Request succeeded after retry');
-        }
-        
-        this.logger.debug({
-          serviceUrl,
-          methodName,
-          resultType: typeof result,
-          resultKeys: result && typeof result === 'object' ? Object.keys(result) : null
-        }, 'Request completed successfully');
-        
-        return result;
-        
-      } catch (error) {
-        lastError = error;
-        
-        if (attempt === maxRetries) break;
-        
-        const shouldRetry = this.#shouldRetry(error, retryOn);
-        if (!shouldRetry) {
+            resultType: typeof result,
+            resultKeys: result && typeof result === 'object' ? Object.keys(result) : null,
+            circuitBreakerState: this.#getCircuitBreakerState(serviceUrl).state
+          }, 'Resilient request completed successfully');
+          
+          return result;
+          
+        } catch (error) {
+          lastError = error;
+          
+          // Update circuit breaker on failure
+          this.#updateCircuitBreakerOnFailure(serviceUrl, error);
+          
+          // Check if we should continue retrying
+          if (attempt === maxRetries) break;
+          
+          const shouldRetry = this.#shouldRetry(error, retryOn);
+          if (!shouldRetry) {
+            this.logger.warn({
+              methodName,
+              serviceUrl,
+              errorMessage: error.message,
+              errorCode: error.code,
+              errorStatus: error.status,
+              circuitBreakerState: this.#getCircuitBreakerState(serviceUrl).state
+            }, 'Request failed, retry not applicable for error type');
+            break;
+          }
+          
           this.logger.warn({
             methodName,
+            serviceUrl,
+            attempt: attempt + 1,
+            maxAttempts: maxRetries + 1,
             errorMessage: error.message,
             errorCode: error.code,
-            errorStatus: error.status
-          }, 'Request failed, retry not applicable for error type');
-          break;
+            errorStatus: error.status,
+            isTimeout: error.message?.includes('timeout'),
+            circuitBreakerState: this.#getCircuitBreakerState(serviceUrl).state
+          }, 'Request attempt failed, will retry with resilience patterns');
         }
-        
-        this.logger.warn({
-          methodName,
-          attempt: attempt + 1,
-          maxAttempts: maxRetries + 1,
-          errorMessage: error.message,
-          errorCode: error.code,
-          errorStatus: error.status
-        }, 'Request attempt failed, will retry');
       }
-    }
 
-    this.logger.error({
-      methodName,
-      serviceUrl,
-      totalAttempts: maxRetries + 1,
-      finalError: {
-        message: lastError.message,
-        code: lastError.code,
-        status: lastError.status
-      }
-    }, 'Request failed after all retry attempts');
-    throw lastError;
+      // All retries exhausted
+      this.logger.error({
+        methodName,
+        serviceUrl,
+        totalAttempts: maxRetries + 1,
+        finalError: {
+          message: lastError.message,
+          code: lastError.code,
+          status: lastError.status
+        },
+        circuitBreakerState: this.#getCircuitBreakerState(serviceUrl).state,
+        resilience: {
+          timeoutCount: this.metrics.timeoutCount,
+          circuitBreakerTrips: this.metrics.circuitBreakerTrips,
+          bulkheadRejections: this.metrics.bulkheadRejections
+        }
+      }, 'Resilient request failed after all retry attempts');
+      
+      throw lastError;
+      
+    } finally {
+      // Step 5: Always release bulkhead permit
+      this.#releaseBulkheadPermit();
+    }
   }
 
   async start() {
@@ -276,10 +543,72 @@ class RPCMate {
   }
 
   getMetrics() {
+    // Update circuit breaker states in metrics
+    this.metrics.circuitBreakerState = {};
+    for (const [serviceUrl, state] of this.circuitBreakers) {
+      this.metrics.circuitBreakerState[serviceUrl] = {
+        state: state.state,
+        failureCount: state.failureCount,
+        successCount: state.successCount,
+        lastFailureTime: state.lastFailureTime
+      };
+    }
+    
     return {
       ...this.metrics,
-      uptime: Date.now() - this.metrics.startTime
+      uptime: Date.now() - this.metrics.startTime,
+      bulkhead: {
+        activeRequests: this.bulkheadState.activeRequests,
+        queuedRequests: this.bulkheadState.queuedRequests.length,
+        rejectedRequests: this.bulkheadState.rejectedRequests
+      }
     };
+  }
+
+  // Get resilience-specific metrics
+  getResilienceMetrics() {
+    const metrics = this.getMetrics();
+    return {
+      resilience: {
+        timeout: {
+          enabled: this.resilience.timeout.enabled,
+          requestTimeout: this.resilience.timeout.requestTimeout,
+          timeoutCount: metrics.timeoutCount
+        },
+        circuitBreaker: {
+          enabled: this.resilience.circuitBreaker.enabled,
+          trips: metrics.circuitBreakerTrips,
+          states: metrics.circuitBreakerState
+        },
+        bulkhead: {
+          enabled: this.resilience.bulkhead.enabled,
+          maxConcurrentRequests: this.resilience.bulkhead.maxConcurrentRequests,
+          activeRequests: metrics.bulkhead.activeRequests,
+          queuedRequests: metrics.bulkhead.queuedRequests,
+          rejections: metrics.bulkheadRejections
+        },
+        retry: {
+          enabled: this.resilience.retry.maxRetries > 0,
+          maxRetries: this.resilience.retry.maxRetries,
+          jitterEnabled: this.resilience.retry.jitterEnabled,
+          totalRetries: metrics.retryCount
+        }
+      }
+    };
+  }
+
+  // Reset circuit breaker for a specific service
+  resetCircuitBreaker(serviceUrl) {
+    if (this.circuitBreakers.has(serviceUrl)) {
+      const circuit = this.circuitBreakers.get(serviceUrl);
+      circuit.state = 'CLOSED';
+      circuit.failureCount = 0;
+      circuit.successCount = 0;
+      circuit.lastFailureTime = 0;
+      circuit.nextAttemptTime = 0;
+      
+      this.logger.info({ serviceUrl }, 'Circuit breaker manually reset to CLOSED state');
+    }
   }
 
   #formatResponse(data, error = null) {
@@ -660,23 +989,24 @@ class RPCMate {
   async #makeRequest(serviceUrl, methodName, params, options) {
     return new Promise((resolve, reject) => {
       const parsedUrl = url.parse(serviceUrl);
-      const client = http2.connect(`${parsedUrl.protocol}//${parsedUrl.host}`);
+      let client;
+      let connectionTimeout;
+      let isComplete = false;
 
-      const headers = {
-        ':method': 'POST',
-        ':path': `/${methodName}`,
-        'content-type': 'application/json'
+      const cleanup = () => {
+        if (connectionTimeout) {
+          clearTimeout(connectionTimeout);
+        }
+        if (client && !client.closed && !client.destroyed) {
+          client.close();
+        }
       };
 
-      if (options.token) {
-        headers.authorization = `Bearer ${options.token}`;
-      }
-
-      const req = client.request(headers);
-      let responseData = '';
-
       const handleError = (error) => {
-        client.close();
+        if (isComplete) return;
+        isComplete = true;
+        cleanup();
+        
         const enhancedError = new Error(error.message || 'HTTP/2 Request Error');
         enhancedError.code = error.code || 'UNKNOWN_ERROR';
         enhancedError.status = error.status || 500;
@@ -684,38 +1014,80 @@ class RPCMate {
         reject(enhancedError);
       };
 
-      req.on('data', (chunk) => { responseData += chunk; });
-      
-      req.on('end', () => {
-        client.close();
-        try {
-          const response = JSON.parse(responseData);
-          resolve(response);
-        } catch (error) {
-          const parseError = new Error(`Failed to parse response: ${error.message}`);
-          parseError.status = 500;
-          parseError.code = 'PARSE_ERROR';
-          reject(parseError);
+      try {
+        client = http2.connect(`${parsedUrl.protocol}//${parsedUrl.host}`);
+
+        // Connection timeout
+        if (this.resilience.timeout.enabled) {
+          connectionTimeout = setTimeout(() => {
+            if (!isComplete) {
+              handleError(new Error(`Connection timeout after ${this.resilience.timeout.connectionTimeout}ms`));
+            }
+          }, this.resilience.timeout.connectionTimeout);
         }
-      });
 
-      req.on('error', handleError);
-      req.on('frameError', handleError);
-      req.on('goaway', handleError);
+        client.on('connect', () => {
+          if (connectionTimeout) {
+            clearTimeout(connectionTimeout);
+            connectionTimeout = null;
+          }
+        });
 
-      req.on('response', (headers) => {
-        const status = headers[':status'];
-        if (status >= 400) {
-          const error = new Error(`HTTP ${status}`);
-          error.status = status;
-          error.response = responseData;
-          error.code = `HTTP_${status}`;
-          client.close();
-          reject(error);
+        client.on('error', handleError);
+        client.on('goaway', handleError);
+
+        const headers = {
+          ':method': 'POST',
+          ':path': `/${methodName}`,
+          'content-type': 'application/json'
+        };
+
+        if (options.token) {
+          headers.authorization = `Bearer ${options.token}`;
         }
-      });
 
-      req.end(JSON.stringify(params));
+        const req = client.request(headers);
+        let responseData = '';
+
+        req.on('data', (chunk) => { 
+          responseData += chunk; 
+        });
+        
+        req.on('end', () => {
+          if (isComplete) return;
+          isComplete = true;
+          cleanup();
+          
+          try {
+            const response = JSON.parse(responseData);
+            resolve(response);
+          } catch (error) {
+            const parseError = new Error(`Failed to parse response: ${error.message}`);
+            parseError.status = 500;
+            parseError.code = 'PARSE_ERROR';
+            reject(parseError);
+          }
+        });
+
+        req.on('error', handleError);
+        req.on('frameError', handleError);
+
+        req.on('response', (headers) => {
+          const status = headers[':status'];
+          if (status >= 400) {
+            const error = new Error(`HTTP ${status}`);
+            error.status = status;
+            error.response = responseData;
+            error.code = `HTTP_${status}`;
+            handleError(error);
+          }
+        });
+
+        req.end(JSON.stringify(params));
+
+      } catch (error) {
+        handleError(error);
+      }
     });
   }
 
@@ -725,6 +1097,16 @@ class RPCMate {
       'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 
       'EHOSTUNREACH', 'ENETUNREACH', 'ERR_HTTP2_ERROR'
     ];
+
+    // Don't retry on certain error types
+    const nonRetryableErrors = [
+      'UNAUTHORIZED', 'FORBIDDEN', 'BAD_REQUEST', 'INVALID_JSON',
+      'METHOD_NOT_FOUND', 'PAYLOAD_TOO_LARGE'
+    ];
+
+    if (error.code && nonRetryableErrors.includes(error.code)) {
+      return false;
+    }
 
     // Retry by status code
     if (error.status && retryStatuses.includes(error.status)) {
@@ -736,6 +1118,15 @@ class RPCMate {
       return true;
     }
 
+    // Retry timeout errors (both connection and request timeouts)
+    if (error.message && (
+      error.message.includes('timeout') || 
+      error.message.includes('Connection timeout') ||
+      error.message.includes('Request timeout')
+    )) {
+      return true;
+    }
+
     return false;
   }
 
@@ -744,4 +1135,4 @@ class RPCMate {
   }
 }
 
-module.exports = RPCMate; 
+module.exports = Http2RPC; 
