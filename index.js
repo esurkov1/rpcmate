@@ -78,7 +78,7 @@ class Http2RPC {
       ...options.logger
     };
     
-    this.logger = this.#createLogger(loggerConfig);
+    this.logger = options.logger || this.#createLogger(loggerConfig);
     
     this.cors = options.cors !== false;
     this.corsOptions = {
