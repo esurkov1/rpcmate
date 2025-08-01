@@ -18,9 +18,9 @@ RPCMate is a production-ready Node.js library that simplifies building HTTP/2 RP
   - **Bulkhead Pattern** - Resource isolation and concurrency control
   - **Circuit Breaker Pattern** - Automatic failure detection and recovery
   - **Enhanced Retry Pattern** - Exponential backoff with jitter
-- **Built-in Metrics** and health check endpoints
+  - **Built-in Metrics** and health check endpoints
 - **CORS Support** with configurable options
-- **Graceful Shutdown** handling
+
 - **Structured Logging** with Pino (development and production modes)
 - **Simple API** for quick integration
 - **TypeScript Ready** (types included)
@@ -213,11 +213,8 @@ Starts the HTTP/2 server.
 
 **Returns:** Promise<Server>
 
-#### `stop(timeout)`
+#### `stop()`
 Stops the server gracefully.
-
-**Parameters:**
-- `timeout` (number) - Shutdown timeout in ms (default: 5000)
 
 #### `getMetrics()`
 Returns comprehensive server metrics including resilience patterns data.

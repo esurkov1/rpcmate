@@ -10,7 +10,7 @@ const DEFAULTS = {
   MAX_REQUEST_SIZE: 1024 * 1024, // 1MB
   DEFAULT_TIMEOUT: 30000,
   CONNECTION_TIMEOUT: 5000,
-  SHUTDOWN_TIMEOUT: 5000,
+  // SHUTDOWN_TIMEOUT was removed
   LOG_LEVEL: 'info',
   JWT_ALGORITHM: 'RS256',
   CORS_METHODS: 'GET, POST, OPTIONS',
@@ -154,8 +154,7 @@ class Http2RPC {
       });
     }
 
-    this._setupGracefulShutdown = this.#setupGracefulShutdown.bind(this);
-    this._setupGracefulShutdown();
+    // Graceful shutdown functionality was removed
     
     // Start server only if methods are provided or explicitly requested
     const shouldStartServer = options.methods || options.startServer === true;
@@ -639,7 +638,7 @@ class Http2RPC {
     });
   }
 
-  async stop(timeout = DEFAULTS.SHUTDOWN_TIMEOUT) {
+  async stop() {
     return new Promise((resolve, reject) => {
       if (!this.server) {
         this.logger.debug('Stop called but server is not running');
@@ -647,16 +646,9 @@ class Http2RPC {
         return;
       }
 
-      this.logger.info({ timeout }, 'Initiating server shutdown');
-      
-      const forceShutdown = setTimeout(() => {
-        this.logger.warn({ timeout }, 'Force closing server due to timeout exceeded');
-        this.server.close();
-        resolve();
-      }, timeout);
+      this.logger.info('Initiating server shutdown');
 
       this.server.close((err) => {
-        clearTimeout(forceShutdown);
         if (err) {
           this.logger.error({ error: err.message }, 'Error occurred during server shutdown');
           reject(err);
@@ -1282,34 +1274,7 @@ class Http2RPC {
     };
   }
 
-  #setupGracefulShutdown() {
-    // Only setup signal handlers if we're not in test environment
-    if (process.env.NODE_ENV === 'test') {
-      return;
-    }
-    
-    const shutdown = async (signal) => {
-      this.logger.info({ signal }, 'Received shutdown signal, starting graceful shutdown');
-      
-      try {
-        await this.stop();
-        this.logger.info('Graceful shutdown completed');
-        process.exit(0);
-      } catch (error) {
-        this.logger.error({ error: error.message }, 'Error during graceful shutdown');
-        process.exit(1);
-      }
-    };
-
-    // Store the handlers for potential cleanup
-    this._shutdownHandlers = {
-      sigterm: () => shutdown('SIGTERM'),
-      sigint: () => shutdown('SIGINT')
-    };
-
-    process.on('SIGTERM', this._shutdownHandlers.sigterm);
-    process.on('SIGINT', this._shutdownHandlers.sigint);
-  }
+  // Graceful shutdown was removed
 }
 
 module.exports = Http2RPC;

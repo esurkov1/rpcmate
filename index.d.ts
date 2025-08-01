@@ -163,7 +163,7 @@ declare module 'rpcmate' {
     ): Promise<T>;
 
     start(): Promise<Server>;
-    stop(timeout?: number): Promise<void>;
+    stop(): Promise<void>;
 
     // Metrics and status
     getMetrics(): Metrics;
